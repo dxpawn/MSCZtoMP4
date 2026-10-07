@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from mscz2mp4.exports import measure_scale
-from mscz2mp4.render import DEFAULT_FONTS, missing_glyphs, strip_path, text_layer
+from mscz2mp4.render import DEFAULT_FONTS, SYMBOL_FONT, _runs, missing_glyphs, strip_path, text_layer
 
 # three bars of 200 units from x=100; at 1.5 px per unit the barlines are at px 450, 750 and 1050 (final)
 BARS = [(0.0, 100.0, 200.0), (1.0, 300.0, 200.0), (2.0, 500.0, 200.0)]
@@ -63,7 +63,7 @@ def test_strip_scale_applies():
 
 def test_missing_glyphs():
     regular = DEFAULT_FONTS[0]
-    assert missing_glyphs('Đêm Đông — Nguyễn', regular) == set()
+    assert missing_glyphs('Đêm Đông - Nguyễn', regular) == set()
     assert missing_glyphs('Nocturne 夜想曲', regular) == {'夜', '想', '曲'}
 
 
@@ -72,3 +72,10 @@ def test_long_title_is_shrunk_to_fit():
     _, alpha = text_layer([('A very long title ' * 6, DEFAULT_FONTS[1], 60, (255, 255, 255))], W, 300)
     cols = np.where(alpha[..., 0].max(0) > 0)[0]
     assert cols[0] > 0 and cols[-1] < W - 1
+
+
+def test_symbols_fall_back_to_the_music_font():
+    regular = DEFAULT_FONTS[0]
+    assert _runs('C♯ minor', regular) == [['C', regular], ['♯', SYMBOL_FONT], [' minor', regular]]
+    assert _runs('B♭', regular) == [['B', regular], ['♭', SYMBOL_FONT]]
+    assert _runs('plain', regular) == [['plain', regular]]

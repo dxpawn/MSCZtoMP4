@@ -19,6 +19,7 @@ from .tools import ToolError
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
 DEFAULT_FONTS = tuple(os.path.join(FONT_DIR, f'EBGaramond-{s}.ttf') for s in ('Regular', 'Bold', 'Italic'))
+SYMBOL_FONT = os.path.join(FONT_DIR, 'NotoMusic-Regular.ttf')      # fallback for ♯ ♭ ♮ and the like
 
 # ---------------------------------------------------------------- look (BGR)
 BG       = (22, 17, 14)
@@ -111,25 +112,44 @@ def mix(a, b, f):
     return tuple(int(round(x * (1 - f) + y * f)) for x, y in zip(a, b))
 
 
+def _runs(txt, font_file):
+    """Split a line into [text, font file] runs: characters the font lacks (e.g. the sharp in "C♯ minor") are set
+    in the bundled music-symbol font."""
+    missing = missing_glyphs(txt, font_file)
+    runs = []
+    for ch in txt:
+        f = SYMBOL_FONT if ch in missing else font_file
+        if runs and runs[-1][1] == f:
+            runs[-1][0] += ch
+        else:
+            runs.append([ch, f])
+    return runs
+
+
 def text_layer(lines, W, H):
     """[(text, font file, px, (r,g,b))] centred -> BGR and alpha float layers. Lines too wide for the frame
     are set smaller."""
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    fonts, sizes = [], []
-    for txt, f, px, _ in lines:
-        font = ImageFont.truetype(f, px)
-        w = d.textlength(txt, font=font)
+    laid = []
+    for txt, f, px, rgb in lines:
+        runs = _runs(txt, f)
+
+        def measure(px):
+            fonts = {ff: ImageFont.truetype(ff, px) for ff in {f} | {ff for _, ff in runs}}
+            return fonts, sum(d.textlength(t, font=fonts[ff]) for t, ff in runs)
+        fonts, w = measure(px)
         if w > 0.92 * W:
             px = max(1, int(px * 0.92 * W / w))
-            font = ImageFont.truetype(f, px)
-        fonts.append(font)
-        sizes.append(px)
-    heights = [f.getbbox('ĐÂg')[3] + px * 0.35 for f, px in zip(fonts, sizes)]
+            fonts, w = measure(px)
+        laid.append((runs, fonts, fonts[f], px, w, rgb))
+    heights = [main.getbbox('ĐÂg')[3] + px * 0.35 for _, _, main, px, _, _ in laid]
     y = (H - sum(heights)) / 2
-    for (txt, _, _, rgb), font, h in zip(lines, fonts, heights):
-        w = d.textlength(txt, font=font)
-        d.text(((W - w) / 2, y), txt, font=font, fill=rgb + (255,))
+    for (runs, fonts, main, _, w, rgb), h in zip(laid, heights):
+        x, baseline = (W - w) / 2, y + main.getmetrics()[0]
+        for t, ff in runs:                       # all runs on the main font's baseline
+            d.text((x, baseline), t, font=fonts[ff], fill=rgb + (255,), anchor='ls')
+            x += d.textlength(t, font=fonts[ff])
         y += h
     a = np.asarray(img).astype(np.float32) / 255
     return a[..., [2, 1, 0]], a[..., 3:4]
@@ -249,7 +269,8 @@ class Video:
             T.append(('', regular, int(14 * u), TITLE_RGB))
         T += credits
         self.title = text_layer(T, W, self.kb_top - self.fall_top) if T else None
-        self.missing_glyphs = set() if worker else set().union(*(missing_glyphs(t, f) for t, f, _, _ in T))
+        self.missing_glyphs = set() if worker else set().union(
+            *(missing_glyphs(t, f) & missing_glyphs(t, SYMBOL_FONT) for t, f, _, _ in T))
 
         self.pre = lookahead + 2.0       # seconds of video before the first note sounds
         self.post = 4.5

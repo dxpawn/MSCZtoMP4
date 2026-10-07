@@ -9,7 +9,7 @@ Turn a MuseScore score into a piano video, ready for YouTube:
 
 ![A frame of the demo video: the score strip on top, falling notes, and the keyboard](docs/demo.jpg)
 
-*A frame from [`examples/demo.mscz`](examples/demo.mscz) (J. S. Bach, Prelude in C major BWV 846, bars 1–19).*
+*A frame from [`examples/demo.mscz`](examples/demo.mscz) (J. S. Bach, Prelude in C major BWV 846, bars 1-19).*
 
 Everything comes from MuseScore's own exports, so the video plays exactly what you hear in MuseScore:
 tempo changes, dynamics and pedalling, including hidden tempo and dynamic marks.
@@ -87,8 +87,9 @@ Linux AppImages in `~/Applications`), and finally the Flatpak `org.musescore.Mus
 - **Save the score first.** The video is made from the `.mscz` file on disk, not from what is open in MuseScore.
 - **The title card** uses the score's title frame: title, subtitle and composer. Without a title frame it uses
   the title, composer and arranger from *File → Project properties*. Long lines are set smaller to fit. The
-  bundled font covers Latin, Greek, Cyrillic and Vietnamese; for Chinese, Japanese or Korean titles pass a font
-  that has them, e.g. `--font NotoSerifCJK-Regular.otf` (a warning tells you when characters are missing).
+  bundled font covers Latin, Greek, Cyrillic and Vietnamese, and music symbols such as ♯ and ♭ come from a
+  bundled symbol font. For Chinese, Japanese or Korean titles pass a font that has them, e.g.
+  `--font NotoSerifCJK-Regular.otf` (a warning tells you when characters are missing).
 - **Repeats, D.C./D.S. and endings** are played as MuseScore plays them; the score strip cuts back (or ahead) to
   the right bar at each jump.
 - **Two-staff piano scores** work best. Other scores render too: the top staff is drawn in amber and every other
@@ -112,9 +113,23 @@ Linux AppImages in `~/Applications`), and finally the Flatpak `org.musescore.Mus
 5. Frames are rendered in parallel and piped into ffmpeg (H.264, AAC 320 kb/s). If MuseScore cannot export the
    audio, you get a warning and a silent video.
 
+## Development
+
+```
+pip install -e ".[test]"
+pytest
+```
+
+The integration tests in `tests/test_integration.py` render the demo with the real MuseScore and ffmpeg; they
+are skipped when MuseScore is not found (set `MUSESCORE` if it is installed somewhere unusual). Any `.mscz`
+placed in `tests/scores/` is tested too. That folder is ignored by git, so it can hold scores you are not
+allowed to redistribute.
+
 ## Licence
 
 [GNU Affero General Public License v3.0 or later](LICENSE).
 
-The bundled [EB Garamond](https://github.com/octaviopardo/EBGaramond12) font is licensed under the
-[SIL Open Font License 1.1](src/mscz2mp4/fonts/OFL.txt). The demo score is a public-domain work by J. S. Bach.
+The bundled fonts are licensed under the SIL Open Font License 1.1:
+[EB Garamond](https://github.com/octaviopardo/EBGaramond12) ([licence](src/mscz2mp4/fonts/OFL-EBGaramond.txt))
+and [Noto Music](https://github.com/notofonts/music) ([licence](src/mscz2mp4/fonts/OFL-NotoMusic.txt)).
+The demo score is a public-domain work by J. S. Bach.

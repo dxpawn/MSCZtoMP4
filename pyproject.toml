@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Turn a MuseScore score (.mscz) into a falling-notes piano video with the score scrolling on top"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-license-files = ["LICENSE", "src/mscz2mp4/fonts/OFL.txt"]
+license-files = ["LICENSE", "src/mscz2mp4/fonts/OFL-*.txt"]
 requires-python = ">=3.10"
 dependencies = [
     "imageio-ffmpeg>=0.5",
@@ -36,7 +36,8 @@ Issues = "https://github.com/dxpawn/MSCZtoMP4/issues"
 mscz2mp4 = "mscz2mp4.cli:main"
 
 [tool.setuptools.package-data]
-mscz2mp4 = ["fonts/*.ttf", "fonts/OFL.txt"]
+mscz2mp4 = ["fonts/*.ttf", "fonts/OFL-*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["musescore: needs MuseScore 4 installed (skipped otherwise)"]

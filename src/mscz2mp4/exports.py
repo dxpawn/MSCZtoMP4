@@ -163,7 +163,7 @@ def read_meta(mscz):
     vbox = re.search(r'<VBox>(.*?)</VBox>', s, re.S)
     if vbox:
         for style, body in re.findall(r'<style>(\w+)</style>.*?<text>(.*?)</text>', vbox.group(1), re.S):
-            texts.setdefault(style, _plain(body))
+            texts.setdefault(style.lower(), _plain(body))     # MuseScore 3 writes "Title"
     return {'title': texts.get('title') or tags.get('workTitle', ''),
             'subtitle': texts.get('subtitle', ''),
             'credits': texts.get('composer') or

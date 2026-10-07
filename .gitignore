@@ -223,3 +223,5 @@ __marimo__/
 mscz2mp4-cache/
 examples/*.mp4
 examples/*.png
+# local test scores (not ours to publish); see tests/test_integration.py
+tests/scores/

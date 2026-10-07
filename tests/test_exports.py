@@ -133,3 +133,11 @@ def test_load_ink(tmp_path):
     im.putdata([(0, 0, 0, 255), (255, 255, 255, 255), (0, 0, 0, 0)])    # ink, paper, transparent
     im.save(tmp_path / 'p.png')
     assert exports.load_ink(str(tmp_path / 'p.png')).tolist() == [[1.0, 0.0, 0.0]]
+
+
+def test_meta_musescore_3_style_names(tmp_path):
+    vbox = ('<VBox><Text><style>Title</style><text>Fantaisie in C♯ minor</text></Text>'
+            '<Text><style>Subtitle</style><text>Op. 66</text></Text>'
+            '<Text><style>Composer</style><text>F. Chopin</text></Text></VBox>')
+    m = exports.read_meta(make_mscz(tmp_path / 's.mscz', vbox=vbox))
+    assert m == {'title': 'Fantaisie in C♯ minor', 'subtitle': 'Op. 66', 'credits': 'F. Chopin'}
