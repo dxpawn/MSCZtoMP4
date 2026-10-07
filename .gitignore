@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# mscz2mp4: MuseScore exports and rendered output
+mscz2mp4-cache/
+examples/*.mp4
+examples/*.png
