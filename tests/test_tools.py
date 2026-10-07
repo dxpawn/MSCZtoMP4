@@ -40,6 +40,15 @@ def test_path_in_name_order(clean, monkeypatch):
     assert find_musescore() == (['/bin/mscore4'], 'PATH')
 
 
+def test_skips_musescore_3_on_path(clean, monkeypatch):
+    monkeypatch.setattr(tools.shutil, 'which', lambda name: '/usr/bin/mscore' if name == 'mscore' else None)
+    monkeypatch.setattr(tools, 'major_version', lambda cmd: 3)
+    with pytest.raises(ToolError, match='MuseScore 3'):
+        find_musescore()
+    monkeypatch.setattr(tools, 'major_version', lambda cmd: 4)
+    assert find_musescore() == (['/usr/bin/mscore'], 'PATH')
+
+
 def test_install_location(clean, tmp_path, monkeypatch):
     missing, present = str(tmp_path / 'nope'), exe(tmp_path, 'MuseScore4.exe')
     monkeypatch.setattr(tools, '_install_locations', lambda: [missing, present])

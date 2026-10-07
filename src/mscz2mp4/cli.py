@@ -32,10 +32,11 @@ def parse_args(argv=None):
     ap.add_argument('--crf', type=int, default=16, help='H.264 quality, lower is better (default 16)')
     ap.add_argument('--strip', choices=sorted(STRIPS), default='light',
                     help='score strip colours: light paper (default) or dark')
-    ap.add_argument('--still', type=float, nargs='+', metavar='T',
-                    help='only write PNG frames at these music times (seconds)')
-    ap.add_argument('--preview', type=float, nargs=2, metavar=('START', 'DUR'),
-                    help='only write a short clip with audio: START and DUR in seconds of music time')
+    only = ap.add_mutually_exclusive_group()
+    only.add_argument('--still', type=float, nargs='+', metavar='T',
+                      help='only write PNG frames at these music times (seconds)')
+    only.add_argument('--preview', type=float, nargs=2, metavar=('START', 'DUR'),
+                      help='only write a short clip with audio: START and DUR in seconds of music time')
     ap.add_argument('--mscore', metavar='PATH', help='MuseScore 4 program (default: found automatically)')
     ap.add_argument('--ffmpeg', metavar='PATH', help='ffmpeg program (default: found automatically)')
     ap.add_argument('--cache-dir', metavar='DIR',
@@ -58,6 +59,10 @@ def parse_args(argv=None):
         ap.error('--jobs must be at least 1')
     if a.fps < 1:
         ap.error('--fps must be at least 1')
+    if not 0 <= a.crf <= 51:
+        ap.error('--crf must be between 0 and 51')
+    if a.preview and a.preview[1] <= 0:
+        ap.error('--preview DUR must be more than 0')
     return a
 
 
@@ -117,6 +122,10 @@ def run(a):
     mscore, _ = find_musescore(a.mscore)
     ffmpeg = None if a.still else find_ffmpeg(a.ffmpeg)[0]
     build = exports.default_cache_dir(score, a.cache_dir)
+    try:
+        os.makedirs(build, exist_ok=True)
+    except OSError as e:
+        raise ToolError(f'cannot create the cache folder {build} ({e.strerror}); pick another place with --cache-dir')
     print(f'cache: {build}', flush=True)
 
     W, H = a.size
@@ -129,10 +138,23 @@ def run(a):
         print(f'note: {info["out_of_range"]} notes outside the piano range (A0-C8) are not drawn.')
     if info['drums']:
         print(f'note: {info["drums"]} percussion notes are not drawn.')
+    if v.missing_glyphs:
+        chars = ''.join(sorted(v.missing_glyphs))
+        print(f'note: the title font cannot draw these characters of the title card: {chars}\n'
+              '      pass a font that has them with --font, e.g. Noto Serif CJK for Chinese, Japanese or Korean.')
 
-    base = os.path.splitext(a.out or os.path.splitext(score)[0] + '.mp4')[0]
-    if a.strip != 'light' and not a.out:
-        base += f' ({a.strip})'
+    stem = os.path.splitext(os.path.basename(score))[0]
+    if a.strip != 'light':
+        stem += f' ({a.strip})'
+    if a.out and os.path.isdir(a.out):                  # -o some/folder: default name inside it
+        base = os.path.join(a.out, stem)
+    elif a.out:
+        base = os.path.splitext(a.out)[0]
+    else:
+        base = os.path.join(os.path.dirname(score), stem)
+    folder = os.path.dirname(os.path.abspath(base))
+    if not os.path.isdir(folder):
+        raise ToolError(f'the output folder {folder} does not exist')
     if a.still:
         for s in a.still:
             p = f'{base} still {s:g}.png'
@@ -140,8 +162,8 @@ def run(a):
             cv2.imencode('.png', v.frame(s + v.pre))[1].tofile(p)
             print('wrote', p)
     elif a.preview:
-        v.render(f'{base} preview {a.preview[0]:g}.mp4', ffmpeg, a.fps, a.preview[0] + v.pre, a.preview[1],
-                 a.crf, a.jobs)
+        start = max(0.0, a.preview[0] + v.pre)        # the video starts v.pre seconds before the music
+        v.render(f'{base} preview {a.preview[0]:g}.mp4', ffmpeg, a.fps, start, a.preview[1], a.crf, a.jobs)
     else:
         print(f'length {v.duration:.0f} s; rendering takes a while (roughly twice the length at 1440p60 on a '
               'desktop CPU)')
@@ -160,6 +182,9 @@ def main(argv=None):
     try:
         return check(a) if a.check else run(a)
     except ToolError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+    except OSError as e:
         print(f'error: {e}', file=sys.stderr)
         return 1
     except KeyboardInterrupt:

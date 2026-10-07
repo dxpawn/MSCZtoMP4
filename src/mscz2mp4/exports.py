@@ -25,7 +25,7 @@ from .tools import ToolError, run_musescore
 
 Image.MAX_IMAGE_PIXELS = None          # the continuous-view strip is one very wide image
 
-CACHE_VERSION = '1'                    # bump when the cached files change meaning
+CACHE_VERSION = '2'                    # bump when the cached files change meaning
 EXPORTS = ('mid', 'mpos', 'spos', 'mp3')
 # every file this program writes into a cache folder; nothing else there is ever deleted
 OWN_FILE = re.compile(r'(line\.mscz|source\.sha1|score\.(mid|mpos|spos|mp3)|strip\d+(-\d+)?\.png'
@@ -86,9 +86,15 @@ def prepare(mscz, build, mscore):
         out = os.path.join(build, 'score.' + ext)
         if not os.path.exists(out):
             print('exporting', ext, flush=True)
-            run_musescore(mscore, (['-b', '320'] if ext == 'mp3' else []) + ['-o', out, line])
-            if not os.path.exists(out):
-                raise ToolError(f'MuseScore reported success but wrote no {ext} file')
+            try:
+                run_musescore(mscore, (['-b', '320'] if ext == 'mp3' else []) + ['-o', out, line])
+                if not os.path.exists(out):
+                    raise ToolError(f'MuseScore reported success but wrote no {ext} file')
+            except ToolError as e:
+                if ext != 'mp3':
+                    raise
+                # the picture does not need the audio: carry on, and try again next time
+                print(f'warning: MuseScore could not export the audio, so videos will be silent.\n  {e}')
     if not fresh:
         with open(src, 'w') as f:            # written last: an interrupted export is redone next time
             f.write(key)
@@ -106,10 +112,32 @@ def strip_png(line, build, dpi, mscore):
 
 
 def load_ink(path):
-    """Score PNG (black on white, or on transparent) -> ink coverage 0..1."""
-    im = np.asarray(Image.open(path).convert('RGBA')).astype(np.float32) / 255
-    lum = im[..., :3] @ np.array([0.299, 0.587, 0.114], np.float32)
-    return im[..., 3] * (1 - lum)
+    """Score PNG (black on white, or on transparent) -> ink coverage 0..1 (float32)."""
+    la = np.asarray(Image.open(path).convert('LA'))      # luminance + alpha: the strip can be huge
+    ink = la[..., 1].astype(np.float32) * (1 / 255)
+    ink *= 1 - la[..., 0].astype(np.float32) * (1 / 255)
+    return ink
+
+
+def measure_scale(ink, bars):
+    """Image px per .mpos/.spos position unit of a strip PNG.
+
+    MuseScore's -r option does not give that many px per inch (4.7 renders about r/4), so the scale is measured
+    from the final barline, which is the right edge of the rightmost bar. Normally that is the rightmost ink in
+    the image, but text can stick out past it (e.g. "D.C. al Fine"), so the barline is found as the place where
+    the staff lines end."""
+    right = max(x + sx for _, x, sx in bars)
+    cols = np.where(ink.max(0) > 0.3)[0]
+    k_est = (cols[-1] + 1) / right
+    dark = ink > 0.5
+    rows = dark.mean(1)
+    staff_rows = np.where(rows >= 0.5 * rows.max())[0]     # staff lines run (almost) the whole strip
+    if rows.max() < 0.5 * len(cols) / ink.shape[1]:
+        return k_est                                         # no staff lines found (e.g. hidden): best effort
+    on_staff = np.where(dark[staff_rows].mean(0) >= 0.6)[0]
+    k_staff = (on_staff[-1] + 1) / right
+    # keep the exact rightmost-ink measurement unless something clearly sticks out past the staff
+    return k_est if k_staff >= 0.997 * k_est else k_staff
 
 
 def positions(path):

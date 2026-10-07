@@ -77,18 +77,24 @@ mscz2mp4 "My Piece.mscz" --res 1920x1080 --fps 30 -o out.mp4
 
 MuseScore is looked for in this order: `--mscore`, `MUSESCORE`, `PATH` (`mscore`, `mscore4`, `musescore`,
 `MuseScore4`, `mscore4portable`), the usual install folders (Windows `Program Files`, macOS `/Applications`,
-Linux AppImages in `~/Applications`), and finally the Flatpak `org.musescore.MuseScore`.
+Linux AppImages in `~/Applications`), and finally the Flatpak `org.musescore.MuseScore`. A MuseScore 3 found as
+`mscore` or `musescore` is skipped: it cannot open MuseScore 4 scores.
 
 ## Tips
 
 - **Hidden marks are honoured.** Tempo and dynamic marks made invisible in MuseScore still play, so you can
   shape the performance without cluttering the score.
+- **Save the score first.** The video is made from the `.mscz` file on disk, not from what is open in MuseScore.
 - **The title card** uses the score's title frame: title, subtitle and composer. Without a title frame it uses
-  the title, composer and arranger from *File → Project properties*.
+  the title, composer and arranger from *File → Project properties*. Long lines are set smaller to fit. The
+  bundled font covers Latin, Greek, Cyrillic and Vietnamese; for Chinese, Japanese or Korean titles pass a font
+  that has them, e.g. `--font NotoSerifCJK-Regular.otf` (a warning tells you when characters are missing).
+- **Repeats, D.C./D.S. and endings** are played as MuseScore plays them; the score strip cuts back (or ahead) to
+  the right bar at each jump.
 - **Two-staff piano scores** work best. Other scores render too: the top staff is drawn in amber and every other
   staff in blue (a warning says so). Notes outside the 88 keys and percussion are left out.
 - **Render time:** expect about two to three times the length of the piece at 1440p60 on a desktop CPU. The
-  74-second demo took 2½ minutes with 24 render processes. Use `--still` and `--preview` while you adjust the score.
+  74-second demo took 2 minutes with 24 render processes. Use `--still` and `--preview` while you adjust the score.
 - **Cache:** MuseScore's exports are kept in `mscz2mp4-cache/<score name>/` next to the score (the path is
   printed on every run) and redone automatically when the score changes. Delete the folder whenever you like.
 
@@ -100,10 +106,11 @@ Linux AppImages in `~/Applications`), and finally the Flatpak `org.musescore.Mus
    its score following), the audio as MP3, and the strip as a PNG.
 3. The strip's position follows the `.spos` times, smoothed so it glides instead of jumping from note to note.
    MuseScore's PNG resolution option does not map to a fixed scale, so the scale is measured from the image:
-   the final barline is the right edge of the last bar.
+   the final barline (where the staff lines end) is the right edge of the last bar.
 4. MuseScore's MP3 starts slightly late against its MIDI (about 50 ms). The delay is measured for each export
    by matching the attacks in the audio with the MIDI note onsets, and compensated.
-5. Frames are rendered in parallel and piped into ffmpeg (H.264, AAC 320 kb/s).
+5. Frames are rendered in parallel and piped into ffmpeg (H.264, AAC 320 kb/s). If MuseScore cannot export the
+   audio, you get a warning and a silent video.
 
 ## Licence
 

@@ -3,6 +3,9 @@
 video: frames rendered in parallel and piped into ffmpeg together with MuseScore's audio."""
 import multiprocessing as mp
 import os
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 import subprocess
 import time
 
@@ -53,6 +56,41 @@ def key_layout(W):
     return geo, ww
 
 
+# ---------------------------------------------------------------- strip motion
+def strip_path(seg, bars, px, end, dt, sigma=0.18):
+    """Strip x (px) on a time grid: returns (time of the first grid point, x per grid point).
+
+    Follows the .spos segment times, smoothed so the strip glides instead of jumping from segment to segment.
+    Repeats and jumps (D.C., D.S., second endings) show up in the .mpos bars, listed in playing order, as a bar
+    that does not start where the previous one ended: the strip cuts there instead of gliding across."""
+    tol = 0.01 * float(np.median([sx for _, _, sx in bars]))
+    cuts, ends = [], []                    # time of each cut, and the x where the strip stops before it
+    for (t0, x0, sx0), (t1, x1, _) in zip(bars, bars[1:]):
+        if abs(x1 - (x0 + sx0)) > tol:
+            cuts.append(t1)
+            ends.append(x0 + sx0)
+    ends.append(bars[-1][1] + bars[-1][2])  # the last bar played (the Fine bar after a D.C. al Fine)
+    starts = [-np.inf] + cuts
+    stops = cuts + [end]
+
+    grid = np.arange(-10, end + 20, dt)
+    xg = np.empty_like(grid)
+    sig = sigma / dt
+    kern = np.exp(-0.5 * (np.arange(-4 * sig, 4 * sig + 1) / sig) ** 2)
+    kern /= kern.sum()
+    n = len(kern) // 2
+    for t_start, t_stop, x_end in zip(starts, stops, ends):
+        piece = [(t, x) for t, x, _ in seg if t_start <= t < t_stop] + [(t_stop, x_end)]
+        ts, xs = zip(*piece)
+        # within a piece the strip only moves forward (small backward steps are layout noise)
+        ts, xs = np.maximum.accumulate(ts), np.maximum.accumulate(xs) * px
+        sel = (grid >= t_start) & (grid < t_stop) if t_stop != end else grid >= t_start
+        x = np.interp(grid[sel], ts, xs)
+        if len(x):
+            xg[sel] = np.convolve(np.pad(x, n, mode='edge'), kern, 'valid')
+    return grid[0], xg
+
+
 # ---------------------------------------------------------------- drawing helpers
 SH = 4                    # cv2 sub-pixel shift: coordinates × 16
 F = 1 << SH
@@ -74,18 +112,40 @@ def mix(a, b, f):
 
 
 def text_layer(lines, W, H):
-    """[(text, font file, px, (r,g,b))] centred -> BGR and alpha float layers."""
+    """[(text, font file, px, (r,g,b))] centred -> BGR and alpha float layers. Lines too wide for the frame
+    are set smaller."""
     img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    fonts = [ImageFont.truetype(f, px) for _, f, px, _ in lines]
-    heights = [f.getbbox('ĐÂg')[3] + px * 0.35 for f, (_, _, px, _) in zip(fonts, lines)]
+    fonts, sizes = [], []
+    for txt, f, px, _ in lines:
+        font = ImageFont.truetype(f, px)
+        w = d.textlength(txt, font=font)
+        if w > 0.92 * W:
+            px = max(1, int(px * 0.92 * W / w))
+            font = ImageFont.truetype(f, px)
+        fonts.append(font)
+        sizes.append(px)
+    heights = [f.getbbox('ĐÂg')[3] + px * 0.35 for f, px in zip(fonts, sizes)]
     y = (H - sum(heights)) / 2
-    for (txt, _, px, rgb), font, h in zip(lines, fonts, heights):
+    for (txt, _, _, rgb), font, h in zip(lines, fonts, heights):
         w = d.textlength(txt, font=font)
         d.text(((W - w) / 2, y), txt, font=font, fill=rgb + (255,))
         y += h
     a = np.asarray(img).astype(np.float32) / 255
     return a[..., [2, 1, 0]], a[..., 3:4]
+
+
+def missing_glyphs(text, font_file):
+    """Characters of `text` the font has no glyph for (they would print as empty boxes)."""
+    font = ImageFont.truetype(font_file, 32)
+
+    def shape(ch):
+        im = Image.new('L', (64, 64))
+        ImageDraw.Draw(im).text((8, 8), ch, font=font, fill=255)
+        return im.tobytes()
+
+    notdef = shape('\U0010FFFD')             # private-use code point: drawn as the font's "missing" glyph
+    return {ch for ch in set(text) if not ch.isspace() and shape(ch) == notdef}
 
 
 # ---------------------------------------------------------------- renderer
@@ -101,6 +161,8 @@ class Video:
         self.build = build
         line = os.path.join(build, 'line.mscz') if worker else exports.prepare(mscz, build, mscore)
         self.audio = os.path.join(build, 'score.mp3')
+        if not os.path.exists(self.audio):
+            self.audio = None                   # MuseScore could not export it: silent video
         u = H / 1080
 
         # layout
@@ -121,19 +183,18 @@ class Video:
         self.end = self.notes[:, 1].max()
         v = self.notes[:, 3]
         lo, hi = np.percentile(v, 5), np.percentile(v, 99)
-        self.vel = np.clip((v - lo) / max(1, hi - lo), 0, 1)
+        if hi - lo < 1:                         # one velocity throughout (no dynamics): middle brightness
+            self.vel = np.full(len(v), 0.5)
+        else:
+            self.vel = np.clip((v - lo) / (hi - lo), 0, 1)
         self.max_dur = (self.notes[:, 1] - self.notes[:, 0]).max()
         self.geo, self.ww = key_layout(W)
 
-        # score strip. MuseScore's -r does not give that many px per inch (4.7 renders about r/4), so the scale
-        # is measured: the rightmost ink column is the final barline = right edge of the last bar in .mpos.
+        # score strip
         seg = exports.positions(os.path.join(build, 'score.spos'))
         bars = exports.positions(os.path.join(build, 'score.mpos'))
-        right = bars[-1][1] + bars[-1][2]
-
-        def unit_px(ink):                                      # image px per position unit
-            return (np.where(ink.max(0) > 0.3)[0][-1] + 1) / right
-
+        if not seg or not bars:
+            raise ToolError('MuseScore exported no note positions for this score')
         target = self.band_h - 2 * 22 * u
         cache = os.path.join(build, f'strip_{H}p.npz')         # scaled strip, so render workers skip the PNGs
         if os.path.exists(cache):
@@ -144,32 +205,22 @@ class Video:
             rows = np.where(probe.max(1) > 0.25)[0]
             r = 40 * 2 * target / (rows[-1] - rows[0] + 1)      # ~2x supersampling, then scale down
             # very long scores: keep the PNG under ~60 000 px wide
-            r = int(min(r, 40 * 60000 / probe.shape[1], 1200) // 10 * 10)
+            r = max(10, int(min(r, 40 * 60000 / probe.shape[1], 1200) // 10 * 10))
             ink = exports.load_ink(exports.strip_png(line, build, r, mscore))
             rows = np.where(ink.max(1) > 0.25)[0]
             y0, y1 = max(0, rows[0] - 2), rows[-1] + 3
             k = target / (y1 - y0)
-            px = unit_px(ink) * k                                # position units -> strip px
+            px = exports.measure_scale(ink, bars) * k            # position units -> strip px
             ink = cv2.resize(ink[y0:y1], None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            ink = np.clip(np.rint(ink * 255), 0, 255).astype(np.uint8)   # 8 bits: a quarter of the memory
             np.savez(cache, ink=ink, px=px)
         self.strip_top = int((self.band_h - ink.shape[0]) / 2)
         self.pad = W
         self.ink = np.pad(ink, ((0, 0), (self.pad, self.pad + 2)))
 
-        # time -> strip x, smoothed so the strip glides instead of jumping segment to segment
-        ts = [t for t, _, _ in seg]
-        xs = [x * px for _, x, _ in seg]
-        ts.append(self.end); xs.append((bars[-1][1] + bars[-1][2]) * px)
         self.bars = [(t, x * px, (x + sx) * px) for t, x, sx in bars]
         self.dt = 0.005
-        grid = np.arange(-10, self.end + 20, self.dt)
-        xg = np.interp(grid, np.maximum.accumulate(ts), np.maximum.accumulate(xs))
-        sig = 0.18 / self.dt
-        kern = np.exp(-0.5 * (np.arange(-4 * sig, 4 * sig + 1) / sig) ** 2)
-        kern /= kern.sum()
-        n = len(kern) // 2
-        xg = np.convolve(np.pad(xg, n, mode='edge'), kern, 'valid')
-        self.grid0, self.xg = grid[0], xg
+        self.grid0, self.xg = strip_path(seg, bars, px, self.end, self.dt)
 
         # static layers
         self.base = np.empty((H, W, 3), np.uint8)
@@ -198,6 +249,7 @@ class Video:
             T.append(('', regular, int(14 * u), TITLE_RGB))
         T += credits
         self.title = text_layer(T, W, self.kb_top - self.fall_top) if T else None
+        self.missing_glyphs = set() if worker else set().union(*(missing_glyphs(t, f) for t, f, _, _ in T))
 
         self.pre = lookahead + 2.0       # seconds of video before the first note sounds
         self.post = 4.5
@@ -250,7 +302,8 @@ class Video:
         # score band
         sx = self.strip_x(t) - self.play_x + self.pad
         i0 = int(np.floor(sx)); f = sx - i0
-        a = cv2.addWeighted(self.ink[:, i0:i0 + W], 1 - f, self.ink[:, i0 + 1:i0 + W + 1], f, 0)
+        win = self.ink[:, i0:i0 + W + 1].astype(np.float32) * (1 / 255)
+        a = cv2.addWeighted(win[:, :W], 1 - f, win[:, 1:], f, 0)
         a = cv2.multiply(a, self.fade2d)
         y0 = self.strip_top
         th = self.th
@@ -352,6 +405,8 @@ class Video:
         Attack strength of the audio in 1 ms bins (rise of log energy of the differentiated signal) is
         correlated with the MIDI note onsets weighted by velocity; the best-matching shift is the lag."""
         cache = os.path.join(self.build, 'audio_lag.txt')
+        if self.audio is None:
+            return 0.0
         if os.path.exists(cache):
             return float(open(cache).read())
         sr, hop = 44100, 44
@@ -368,6 +423,8 @@ class Video:
         idx = np.round(self.notes[:, 0] * sr / hop).astype(int)
         ok = idx < len(imp)
         np.add.at(imp, idx[ok], self.notes[ok, 3])
+        if not flux.any():
+            return 0.0                          # silent audio: nothing to line up
         lags = range(-100, 300)
         lag = lags[int(np.argmax([np.dot(np.roll(imp, k), flux) for k in lags]))] * hop / sr
         with open(cache, 'w') as f:
@@ -381,37 +438,80 @@ class Video:
         t1 = self.duration if dur is None else min(self.duration, start + dur)
         n = int(round((t1 - start) * fps))
         if n <= 0:
-            raise ToolError('nothing to render: the requested start is after the end of the piece')
+            raise ToolError(f'nothing to render: the video ends at music time {self.duration - self.pre:.1f} s')
         a_start = start - self.pre + self.audio_lag(ffmpeg)   # audio time of the first frame
         delay = max(0.0, -a_start)
         af = [f'adelay={int(delay * 1000)}:all=1'] if delay else []
+        af.append('apad')                       # audio as long as the video (silence after the music)
         fade = min(2.0, (t1 - start) / 2)
         af.append(f'afade=t=out:st={t1 - start - fade:.3f}:d={fade:.3f}')
+        # ffmpeg writes to a temporary name: an interrupted render never leaves a broken file that looks finished
+        part = out + '.part'
         cmd = [ffmpeg, '-y', '-v', 'error',
-               '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{self.W}x{self.H}', '-r', str(fps), '-i', '-',
-               '-ss', f'{max(0.0, a_start):.3f}', '-i', self.audio,
-               '-map', '0:v', '-map', '1:a', '-af', ','.join(af), '-t', f'{t1 - start:.3f}',
-               '-c:v', 'libx264', '-preset', 'slow', '-crf', str(crf), '-pix_fmt', 'yuv420p',
-               '-c:a', 'aac', '-b:a', '320k', '-movflags', '+faststart', out]
+               '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{self.W}x{self.H}', '-r', str(fps), '-i', '-']
+        if self.audio:
+            cmd += ['-ss', f'{max(0.0, a_start):.3f}', '-i', self.audio,
+                    '-map', '0:v', '-map', '1:a', '-af', ','.join(af), '-c:a', 'aac', '-b:a', '320k']
+        cmd += ['-t', f'{t1 - start:.3f}', '-c:v', 'libx264', '-preset', 'slow', '-crf', str(crf),
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-f', 'mp4', part]
         ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         times = [start + i / fps for i in range(n)]
         workers = jobs or max(1, min(24, (os.cpu_count() or 2) - 2))
         print(f'rendering {n} frames at {self.W}x{self.H}, {fps} fps, on {workers} processes', flush=True)
         t_start = time.monotonic()
+        # spawn everywhere: the same behaviour on every OS, and no fork of a process using OpenCV threads
+        pool = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn'),
+                                   initializer=_init_worker, initargs=(self.args,))
+        done = False
         try:
-            with mp.Pool(workers, _init_worker, (self.args,)) as pool:
-                for i, buf in enumerate(pool.imap(_worker_frame, times, chunksize=4)):
+            # a bounded number of frames in flight: if ffmpeg is slower than the workers, finished frames
+            # (11 MB each at 1440p) must not pile up in memory
+            nxt = min(n, 4 * workers)
+            pending = deque(pool.submit(_worker_frame, tv) for tv in times[:nxt])
+            for i in range(n):
+                buf = pending.popleft().result()
+                if nxt < n:
+                    pending.append(pool.submit(_worker_frame, times[nxt]))
+                    nxt += 1
+                try:
                     ff.stdin.write(buf)
-                    if i % (fps * 10) == 0 and i:
-                        el = time.monotonic() - t_start
-                        print(f'  {times[i] - self.pre:6.1f} / {t1 - self.pre:.1f} s music time, '
-                              f'{100 * i / n:3.0f}%, about {_mmss(el * (n - i) / i)} left', flush=True)
-            ff.stdin.close()
-        except BrokenPipeError:
-            pass                                 # ffmpeg stopped: its exit code says why
-        if ff.wait() != 0:
-            raise ToolError(f'ffmpeg failed (exit code {ff.returncode}); see its message above')
+                except OSError:                  # ffmpeg stopped: its exit code and message say why
+                    break
+                if i % (fps * 10) == 0 and i:
+                    el = time.monotonic() - t_start
+                    print(f'  {times[i] - self.pre:6.1f} / {t1 - self.pre:.1f} s music time, '
+                          f'{100 * i / n:3.0f}%, about {_mmss(el * (n - i) / i)} left', flush=True)
+            else:
+                done = True
+        except BrokenProcessPool:
+            raise ToolError('a render process stopped unexpectedly (out of memory?). '
+                            'Try fewer processes, e.g. --jobs 4.')
+        finally:
+            # after an error or Ctrl+C: drop the queued frames; the few being drawn finish quickly
+            pool.shutdown(wait=done, cancel_futures=True)
+            try:
+                ff.stdin.close()
+            except OSError:
+                pass
+            code = ff.wait()
+            if not done or code != 0:
+                _remove(part)
+        if code != 0 or not done:
+            code = code - (1 << 32) if code > (1 << 31) else code      # Windows reports it unsigned
+            raise ToolError(f'ffmpeg failed (exit code {code}); see its message above')
+        try:
+            os.replace(part, out)
+        except OSError as e:
+            _remove(part)
+            raise ToolError(f'could not write {out} (is it open in another program?): {e}')
         print(f'wrote {out} in {_mmss(time.monotonic() - t_start)}')
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _mmss(s):
@@ -426,6 +526,7 @@ _V = None
 
 def _init_worker(args):
     global _V
+    cv2.setNumThreads(1)                 # parallelism comes from the processes
     _V = Video(*args, worker=True)
 
 

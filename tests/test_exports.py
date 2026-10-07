@@ -110,3 +110,26 @@ def test_prepare_rejects_non_zip(tmp_path):
     bad.write_text('not a zip')
     with pytest.raises(ToolError, match='not a .mscz'):
         exports.prepare(str(bad), str(tmp_path / 'cache'), ['mscore'])
+
+
+def test_prepare_survives_failed_audio_export(tmp_path, monkeypatch, capsys):
+    score = make_mscz(tmp_path / 's.mscz')
+    build = tmp_path / 'cache'
+
+    def fake_run(cmd, args):
+        if args[-2].endswith('.mp3'):
+            raise ToolError('exit code 51')
+        open(args[-2], 'w').close()
+    monkeypatch.setattr(exports, 'run_musescore', fake_run)
+
+    exports.prepare(score, str(build), ['mscore'])
+    assert 'videos will be silent' in capsys.readouterr().out
+    assert not (build / 'score.mp3').exists() and (build / 'score.mid').exists()
+
+
+def test_load_ink(tmp_path):
+    from PIL import Image
+    im = Image.new('RGBA', (3, 1))
+    im.putdata([(0, 0, 0, 255), (255, 255, 255, 255), (0, 0, 0, 0)])    # ink, paper, transparent
+    im.save(tmp_path / 'p.png')
+    assert exports.load_ink(str(tmp_path / 'p.png')).tolist() == [[1.0, 0.0, 0.0]]

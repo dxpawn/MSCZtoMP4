@@ -2,6 +2,7 @@
 """Finding and running the external programs: MuseScore 4 and ffmpeg."""
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,7 +12,8 @@ class ToolError(Exception):
     """A problem the user can fix (missing program, bad input); printed without a traceback."""
 
 
-MSCORE_NAMES = ('mscore', 'mscore4', 'musescore', 'MuseScore4', 'mscore4portable')
+MSCORE_NAMES = ('mscore4', 'MuseScore4', 'mscore4portable', 'musescore', 'mscore')
+UNVERSIONED = ('musescore', 'mscore')      # Linux distributions may still ship MuseScore 3 under these
 FLATPAK_ID = 'org.musescore.MuseScore'
 
 MSCORE_HELP = """MuseScore 4 was not found.
@@ -67,9 +69,14 @@ def find_musescore(explicit=None):
     env = os.environ.get('MUSESCORE')
     if env:
         return [_explicit(env, 'MUSESCORE environment variable')], 'MUSESCORE environment variable'
+    skipped = []
     for name in MSCORE_NAMES:
         found = shutil.which(name)
         if found:
+            major = major_version([found]) if name in UNVERSIONED else None
+            if major is not None and major < 4:
+                skipped.append(f'{found} is MuseScore {major}, which cannot open MuseScore 4 scores')
+                continue
             return [found], 'PATH'
     for path in _install_locations():
         if os.path.isfile(path):
@@ -77,7 +84,13 @@ def find_musescore(explicit=None):
     flatpak = _flatpak()
     if flatpak:
         return flatpak, 'Flatpak'
-    raise ToolError(MSCORE_HELP)
+    raise ToolError(MSCORE_HELP + ''.join(f'\n(Skipped {s}.)' for s in skipped))
+
+
+def major_version(cmd):
+    """Major version of a MuseScore program, or None if it cannot be told."""
+    m = re.search(r'(\d+)\.\d+', version(cmd, '--version'))
+    return int(m[1]) if m else None
 
 
 def musescore_env():
